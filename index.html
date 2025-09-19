@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP8266 Sensor Dashboard</title>
+  <style>
+    body { font-family: Arial; margin: 20px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+    th { background-color: #4CAF50; color: white; }
+  </style>
+</head>
+<body>
+  <h1>ESP8266 Sensor Dashboard</h1>
+  <table>
+    <thead>
+      <tr>
+        <th>Timestamp</th>
+        <th>Voltage (V)</th>
+        <th>Current (A)</th>
+        <th>Power (W)</th>
+      </tr>
+    </thead>
+    <tbody id="sensorData">
+      <!-- Data will appear here -->
+    </tbody>
+  </table>
+
+  <script>
+    async function fetchData() {
+      try {
+        const response = await fetch('/api/data');
+        const data = await response.json();
+        const tbody = document.getElementById('sensorData');
+        tbody.innerHTML = '';
+        data.forEach(d => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${new Date(d.timestamp).toLocaleString()}</td>
+            <td>${d.voltage}</td>
+            <td>${d.current}</td>
+            <td>${d.power}</td>
+          `;
+          tbody.appendChild(tr);
+        });
+      } catch (err) {
+        console.error('Error fetching data', err);
+      }
+    }
+
+    fetchData();
+    setInterval(fetchData, 5000); // refresh every 5 seconds
+  </script>
+</body>
+</html>
