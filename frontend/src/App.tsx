@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react'; // Imported useRef
 import axios from 'axios';
 import { AlertTriangle, Zap, Activity, Power, Clock, CheckCircle, XCircle, TrendingUp } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
@@ -13,7 +13,8 @@ interface SensorData {
 
 interface Alert {
   id: string;
-  type: 'short_circuit' | 'normal';
+  // Added 'low_current' to the possible types
+  type: 'short_circuit' | 'low_current' | 'normal';
   message: string;
   timestamp: Date;
   current: number;
@@ -32,17 +33,20 @@ function App() {
   const [sensorData, setSensorData] = useState<SensorData | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [isShortCircuit, setIsShortCircuit] = useState(false);
+  // New state for low current warning
+  const [isLowCurrentWarning, setIsLowCurrentWarning] = useState(false);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
   const [emailStatus, setEmailStatus] = useState<string>('');
   const [apiError, setApiError] = useState<string | null>(null);
+  // NEW: Ref to track the last alert type to avoid duplicates
+  const lastAlertTypeRef = useRef<'short_circuit' | 'low_current' | 'normal'>('normal');
 
 
   // Function to send email alert
   const sendEmailAlert = async (sensorData: SensorData) => {
     try {
-      // This endpoint needs to be implemented on your backend.
-      // It's a placeholder for the email sending logic.
+      // This endpoint triggers the email logic on your backend.
       const response = await fetch('http://192.168.98.1:3000/send-alert', {
         method: 'POST',
         headers: {
@@ -69,13 +73,18 @@ function App() {
 
       const result = await response.json();
       if (result.success) {
-        setEmailStatus(`✅ Alert email sent to j.joshuasamraj@gmail.com`);
+        setEmailStatus(`✅ ${result.message}`);
       } else {
-        setEmailStatus(`❌ Failed to send email: ${result.error}`);
+        // Display message from server if it indicates no new alert was sent
+        if (result.message) {
+            console.log("Server response:", result.message);
+        } else {
+            setEmailStatus(`❌ Failed to send email: ${result.error}`);
+        }
       }
     } catch (error) {
-       console.error("Email service error:", error);
-       setEmailStatus(`❌ (Demo) Email service error. See console for details.`);
+      console.error("Email service error:", error);
+      setEmailStatus(`❌ (Demo) Email service error. See console for details.`);
     }
   };
 
@@ -90,13 +99,13 @@ function App() {
 
         // Create a new SensorData object with a proper Date object
         const newData: SensorData = {
-            _id: latestData._id,
-            voltage: latestData.voltage,
-            current: latestData.current,
-            power: latestData.power,
-            timestamp: new Date(latestData.timestamp),
+          _id: latestData._id,
+          voltage: latestData.voltage,
+          current: latestData.current,
+          power: latestData.power,
+          timestamp: new Date(latestData.timestamp),
         };
-        
+
         setSensorData(newData);
         setLastUpdate(new Date());
 
@@ -113,35 +122,58 @@ function App() {
           power: newData.power,
           timestamp: new Date(newData.timestamp).getTime()
         };
-        
+
         setChartData(prev => {
           const updated = [...prev, newChartPoint];
           // Keep only last 20 data points for smooth animation
           return updated.slice(-20);
         });
 
-        // Check for short circuit condition
-        const shortCircuitDetected = newData.current > 12;
-        setIsShortCircuit(shortCircuitDetected);
+        // Check for conditions
+        const shortCircuitDetected = newData.current > 11;
+        const lowCurrentDetected = newData.current === 0; // Check for low current
 
-        // Add alert if short circuit detected
-        if (shortCircuitDetected) {
-          const newAlert: Alert = {
-            id: newData._id, // Use data ID for alert key
-            type: 'short_circuit',
-            message: `SHORT CIRCUIT DETECTED! Current: ${newData.current}A exceeds safe limit of 12A`,
-            timestamp: new Date(newData.timestamp),
-            current: newData.current
-          };
-          setAlerts(prev => {
-            // Avoid adding duplicate alerts
-            if (prev.find(a => a.id === newAlert.id)) return prev;
-            return [newAlert, ...prev.slice(0, 9)]
-          });
-          
-          // Send email alert
-          sendEmailAlert(newData);
+        setIsShortCircuit(shortCircuitDetected);
+        setIsLowCurrentWarning(lowCurrentDetected); // Set the new state
+
+        // --- MODIFIED ALERT LOGIC ---
+        // Determine the current alert type based on the new data
+        const currentAlertType = shortCircuitDetected ? 'short_circuit' : lowCurrentDetected ? 'low_current' : 'normal';
+
+        // Only trigger a new alert if the state has transitioned into a warning/fault state
+        if (currentAlertType !== 'normal' && currentAlertType !== lastAlertTypeRef.current) {
+            let newAlert: Alert | null = null;
+            
+            // --- ADDED ---
+            // Trigger email alert for either condition
+            sendEmailAlert(newData);
+
+            if (currentAlertType === 'short_circuit') {
+                newAlert = {
+                    id: newData._id,
+                    type: 'short_circuit',
+                    message: `SHORT CIRCUIT DETECTED! Current: ${newData.current}A exceeds safe limit of 11A`,
+                    timestamp: new Date(newData.timestamp),
+                    current: newData.current
+                };
+            } else if (currentAlertType === 'low_current') {
+                newAlert = {
+                    id: newData._id,
+                    type: 'low_current',
+                    message: `LOW CURRENT WARNING! Current is 0A. Possible open circuit or power loss.`,
+                    timestamp: new Date(newData.timestamp),
+                    current: newData.current
+                };
+            }
+            
+            if (newAlert) {
+                setAlerts(prev => [newAlert, ...prev.slice(0, 9)]);
+            }
         }
+        
+        // Always update the ref to the current state for the next comparison
+        lastAlertTypeRef.current = currentAlertType;
+        
       }
     } catch (error) {
       console.error("Error fetching sensor data:", error);
@@ -167,14 +199,16 @@ function App() {
     });
   };
 
+  // Updated logic to include the 0 current case
   const getStatusColor = (current: number) => {
-    if (current > 12) return 'text-red-500';
-    if (current > 10) return 'text-yellow-500';
+    if (current > 11) return 'text-red-500';
+    if (current === 0) return 'text-yellow-500';
     return 'text-green-500';
   };
 
   const getStatusIcon = (current: number) => {
-    if (current > 12) return <XCircle className="h-6 w-6 text-red-500" />;
+    if (current > 11) return <XCircle className="h-6 w-6 text-red-500" />;
+    if (current === 0) return <AlertTriangle className="h-6 w-6 text-yellow-500" />;
     return <CheckCircle className="h-6 w-6 text-green-500" />;
   };
 
@@ -186,9 +220,9 @@ function App() {
           {payload.map((entry: any, index: number) => (
             <p key={index} className="text-sm" style={{ color: entry.color }}>
               {`${entry.dataKey === 'voltage' ? 'Voltage' :
-                  entry.dataKey === 'current' ? 'Current' : 'Power'}: ${entry.value.toFixed(1)}${
+                entry.dataKey === 'current' ? 'Current' : 'Power'}: ${entry.value.toFixed(1)}${
                 entry.dataKey === 'voltage' ? 'V' :
-                entry.dataKey === 'current' ? 'A' : 'W'}`}
+                  entry.dataKey === 'current' ? 'A' : 'W'}`}
             </p>
           ))}
         </div>
@@ -220,17 +254,17 @@ function App() {
           </div>
         </div>
       </header>
-      
-       {/* API Error Banner */}
+
+      {/* API Error Banner */}
       {apiError && (
         <div className="bg-yellow-600 border-l-4 border-yellow-800 px-4 sm:px-6 py-4">
-            <div className="max-w-7xl mx-auto flex items-center">
-                <AlertTriangle className="h-6 w-6 text-white mr-3" />
-                <div>
-                    <p className="font-bold text-sm sm:text-lg">Connection Error</p>
-                    <p className="text-sm">{apiError}</p>
-                </div>
+          <div className="max-w-7xl mx-auto flex items-center">
+            <AlertTriangle className="h-6 w-6 text-white mr-3" />
+            <div>
+              <p className="font-bold text-sm sm:text-lg">Connection Error</p>
+              <p className="text-sm">{apiError}</p>
             </div>
+          </div>
         </div>
       )}
 
@@ -242,8 +276,23 @@ function App() {
             <div>
               <p className="font-bold text-sm sm:text-lg">⚠️ CRITICAL ALERT: SHORT CIRCUIT DETECTED</p>
               <p className="text-sm">
-                Current reading of {sensorData.current}A exceeds safe operating limit of 12A.
+                Current reading of {sensorData.current}A exceeds safe operating limit of 11A.
                 Immediate attention required!
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* NEW: Low Current Warning Banner */}
+      {isLowCurrentWarning && !isShortCircuit && (
+        <div className="bg-yellow-600 border-l-4 border-yellow-800 px-4 sm:px-6 py-4">
+          <div className="max-w-7xl mx-auto flex items-center">
+            <AlertTriangle className="h-6 w-6 text-white mr-3" />
+            <div>
+              <p className="font-bold text-sm sm:text-lg">⚠️ LOW CURRENT WARNING</p>
+              <p className="text-sm">
+                Current reading is 0A. This could indicate an open circuit or power loss.
               </p>
             </div>
           </div>
@@ -278,23 +327,28 @@ function App() {
             </div>
           </div>
 
-          {/* Current Card */}
-          <div className={`bg-gray-800 rounded-lg border p-6 hover:border-yellow-500 transition-colors ${
-            isShortCircuit ? 'border-red-500 bg-red-900 bg-opacity-20' : 'border-gray-700'
-          }`}>
+          {/* UPDATED: Current Card */}
+          <div className={`bg-gray-800 rounded-lg border p-6 hover:border-yellow-500 transition-colors ${isShortCircuit
+            ? 'border-red-500 bg-red-900 bg-opacity-20'
+            : isLowCurrentWarning
+              ? 'border-yellow-500'
+              : 'border-gray-700'
+            }`}>
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center space-x-2">
                 <Activity className="h-5 w-5 text-yellow-400" />
                 <h3 className="text-lg font-semibold text-gray-200">Current</h3>
               </div>
               {isShortCircuit && <AlertTriangle className="h-5 w-5 text-red-400 animate-pulse" />}
+              {isLowCurrentWarning && !isShortCircuit && <AlertTriangle className="h-5 w-5 text-yellow-400" />}
             </div>
             <div className="space-y-2">
               <p className={`text-3xl font-bold ${getStatusColor(sensorData?.current || 0)}`}>
                 {sensorData?.current?.toFixed(1) || '--'}<span className="text-base sm:text-lg text-gray-400 ml-1">A</span>
               </p>
               <p className="text-sm text-gray-400">
-                {sensorData && sensorData.current > 12 ? 'CRITICAL - Short Circuit!' : 'Normal Operation'}
+                {sensorData && sensorData.current > 11 ? 'CRITICAL - Short Circuit!' :
+                  sensorData && sensorData.current === 0 ? 'WARNING - Low Current' : 'Normal Operation'}
               </p>
             </div>
           </div>
@@ -318,7 +372,7 @@ function App() {
 
         {/* System Status */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6 mb-6 sm:mb-8">
-          {/* Status Overview */}
+          {/* UPDATED: Status Overview */}
           <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
             <h3 className="text-xl font-semibold mb-4 flex items-center">
               <Activity className="h-5 w-5 mr-2 text-blue-400" />
@@ -327,15 +381,20 @@ function App() {
             <div className="space-y-4">
               <div className="flex justify-between items-center">
                 <span className="text-gray-300">Operating Status:</span>
-                <span className={`font-semibold ${isShortCircuit ? 'text-red-400' : 'text-green-400'}`}>
-                  {isShortCircuit ? 'FAULT DETECTED' : 'NORMAL'}
+                <span className={`font-semibold ${isShortCircuit ? 'text-red-400' :
+                  isLowCurrentWarning ? 'text-yellow-400' : 'text-green-400'
+                  }`}>
+                  {isShortCircuit ? 'FAULT DETECTED' :
+                    isLowCurrentWarning ? 'WARNING' : 'NORMAL'}
                 </span>
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-gray-300">Current Level:</span>
-                <span className={`font-semibold ${getStatusColor(sensorData?.current || 0)}`}>
-                  {sensorData?.current && sensorData.current > 12 ? 'CRITICAL' :
-                   sensorData?.current && sensorData.current > 10 ? 'WARNING' : 'NORMAL'}
+                <span className={`font-semibold ${getStatusColor(sensorData?.current ?? -1)}`}>
+                  {sensorData?.current !== undefined ?
+                    (sensorData.current > 11 ? 'CRITICAL' :
+                      sensorData.current === 0 ? 'WARNING' : 'NORMAL')
+                    : '--'}
                 </span>
               </div>
               <div className="flex justify-between items-center">
@@ -346,12 +405,12 @@ function App() {
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-gray-300">Safe Current Limit:</span>
-                <span className="text-yellow-400 font-semibold">12.0 A</span>
+                <span className="text-red-400 font-semibold">11.0 A</span>
               </div>
             </div>
           </div>
 
-          {/* Recent Alerts */}
+          {/* UPDATED: Recent Alerts */}
           <div className="bg-gray-800 rounded-lg border border-gray-700 p-6">
             <h3 className="text-xl font-semibold mb-4 flex items-center">
               <AlertTriangle className="h-5 w-5 mr-2 text-red-400" />
@@ -362,12 +421,21 @@ function App() {
                 <p className="text-gray-400 text-center py-4">No recent alerts</p>
               ) : (
                 alerts.map((alert) => (
-                  <div key={alert.id} className="bg-red-900 bg-opacity-30 border border-red-700 rounded p-3">
+                  <div
+                    key={alert.id}
+                    className={`border rounded p-3 ${alert.type === 'short_circuit'
+                        ? 'bg-red-900 bg-opacity-30 border-red-700'
+                        : 'bg-yellow-900 bg-opacity-30 border-yellow-700'
+                      }`}
+                  >
                     <div className="flex items-start space-x-2">
-                      <AlertTriangle className="h-4 w-4 text-red-400 mt-0.5 flex-shrink-0" />
+                      <AlertTriangle className={`h-4 w-4 mt-0.5 flex-shrink-0 ${alert.type === 'short_circuit' ? 'text-red-400' : 'text-yellow-400'
+                        }`} />
                       <div className="flex-1">
-                        <p className="text-sm text-red-200 font-medium">{alert.message}</p>
-                        <p className="text-xs text-red-300 mt-1">
+                        <p className={`text-sm font-medium ${alert.type === 'short_circuit' ? 'text-red-200' : 'text-yellow-200'
+                          }`}>{alert.message}</p>
+                        <p className={`text-xs mt-1 ${alert.type === 'short_circuit' ? 'text-red-300' : 'text-yellow-300'
+                          }`}>
                           {formatTime(alert.timestamp)}
                         </p>
                       </div>
@@ -385,46 +453,47 @@ function App() {
             <TrendingUp className="h-5 w-5 mr-2 text-blue-400" />
             Real-time Monitoring Charts
           </h3>
-          
+
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            {/* Voltage & Current Chart */}
+            {/* UPDATED: Voltage & Current Chart */}
             <div className="bg-gray-900 rounded-lg p-4">
               <h4 className="text-base sm:text-lg font-medium mb-4 text-gray-200">Voltage & Current</h4>
               <div className="h-48 sm:h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={chartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                    <XAxis 
-                      dataKey="time" 
+                    <XAxis
+                      dataKey="time"
                       stroke="#9CA3AF"
-                      fontSize={12}
+                      fontSize={8}
                       interval={'preserveStartEnd'}
                     />
-                    <YAxis stroke="#9CA3AF" fontSize={12} />
+                    <YAxis stroke="#9CA3AF" fontSize={8} />
                     <Tooltip content={<CustomTooltip />} />
-                    <Line 
-                      type="monotone" 
-                      dataKey="voltage" 
-                      stroke="#60A5FA" 
+                    <Line
+                      type="monotone"
+                      dataKey="voltage"
+                      stroke="#60A5FA"
                       strokeWidth={2}
                       dot={{ fill: '#60A5FA', strokeWidth: 2, r: 3 }}
                       activeDot={{ r: 5, stroke: '#60A5FA', strokeWidth: 2 }}
                       isAnimationActive={false} // Better performance for real-time data
                     />
-                    <Line 
-                      type="monotone" 
-                      dataKey="current" 
-                      stroke="#FBBF24" 
+                    <Line
+                      type="monotone"
+                      dataKey="current"
+                      stroke="#FBBF24"
                       strokeWidth={2}
                       dot={{ fill: '#FBBF24', strokeWidth: 2, r: 3 }}
                       activeDot={{ r: 5, stroke: '#FBBF24', strokeWidth: 2 }}
                       isAnimationActive={false}
                     />
-                    <ReferenceLine 
-                      y={12} 
-                      stroke="#EF4444" 
-                      strokeDasharray="5 5" 
-                      label={{ value: "Short Circuit Limit (12A)", position: "insideTopRight", fill: "#EF4444", fontSize: 12 }}
+                    {/* Updated ReferenceLine to 11A for consistency */}
+                    <ReferenceLine
+                      y={11}
+                      stroke="#EF4444"
+                      strokeDasharray="5 5"
+                      label={{ value: "Short Circuit Limit (11A)", position: "insideTopRight", fill: "#EF4444", fontSize: 8 }}
                     />
                   </LineChart>
                 </ResponsiveContainer>
@@ -440,7 +509,7 @@ function App() {
                 </div>
                 <div className="flex items-center space-x-2">
                   <div className="w-3 h-3 bg-red-400 rounded-full"></div>
-                  <span className="text-sm text-gray-300">Limit (12A)</span>
+                  <span className="text-sm text-gray-300">Limit (11A)</span>
                 </div>
               </div>
             </div>
@@ -452,18 +521,18 @@ function App() {
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={chartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                    <XAxis 
-                      dataKey="time" 
+                    <XAxis
+                      dataKey="time"
                       stroke="#9CA3AF"
-                      fontSize={12}
+                      fontSize={8}
                       interval={'preserveStartEnd'}
                     />
-                    <YAxis stroke="#9CA3AF" fontSize={12} />
+                    <YAxis stroke="#9CA3AF" fontSize={8} />
                     <Tooltip content={<CustomTooltip />} />
-                    <Line 
-                      type="monotone" 
-                      dataKey="power" 
-                      stroke="#10B981" 
+                    <Line
+                      type="monotone"
+                      dataKey="power"
+                      stroke="#10B981"
                       strokeWidth={3}
                       dot={{ fill: '#10B981', strokeWidth: 2, r: 4 }}
                       activeDot={{ r: 6, stroke: '#10B981', strokeWidth: 2 }}
@@ -482,33 +551,33 @@ function App() {
           </div>
         </div>
 
-        {/* Current Data Display */}
+        {/* UPDATED: Current Data Display */}
         {sensorData && (
           <div className="mt-6 sm:mt-8 bg-gray-800 rounded-lg border border-gray-700 p-4 sm:p-6">
             <h3 className="text-xl font-semibold mb-4">Latest Sensor Reading</h3>
             <div className="bg-gray-900 rounded p-4 font-mono text-sm overflow-x-auto">
               <pre className="text-gray-300">
-{`{
+                {`{
   "_id": "${sensorData._id}",
   "voltage": ${sensorData.voltage},
   "current": ${sensorData.current},
   "power": ${sensorData.power},
   "timestamp": "${sensorData.timestamp.toISOString()}",
-  "status": "${sensorData.current > 12 ? 'SHORT_CIRCUIT' : 'NORMAL'}"
+  "status": "${sensorData.current > 11 ? 'SHORT_CIRCUIT' : sensorData.current === 0 ? 'LOW_CURRENT_WARNING' : 'NORMAL'}"
 }`}
               </pre>
             </div>
           </div>
         )}
-        
+
         {/* Email Notification Info */}
         <div className="mt-6 bg-blue-900 bg-opacity-30 border border-blue-700 rounded-lg p-4">
-            <h3 className="text-lg font-semibold mb-2 flex items-center">
-                📧 Email Notifications
-            </h3>
-            <p className="text-sm text-blue-200">
-                Automatic email alerts are sent to <strong>j.joshuasamraj@gmail.com</strong> when current exceeds 12A limit.
-            </p>
+          <h3 className="text-lg font-semibold mb-2 flex items-center">
+            📧 Email Notifications
+          </h3>
+          <p className="text-sm text-blue-200">
+            Automatic email alerts are sent to <strong>j.joshuasamraj@gmail.com</strong> when the system state changes to a warning or critical level.
+          </p>
         </div>
 
       </main>
